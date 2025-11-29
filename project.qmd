@@ -4,7 +4,13 @@ format: pdf
 editor: visual
 ---
 
-## Outline
+## Motivation & Outline
+
+**TODO: some background on Kuaishou, video streaming industry etc.**
+
+**TODO: expand: primary motivation:** video streaming platforms like Tiktok and Kuaishou, vertical video format is more natural/native towards how people hold the phones (more often vertically than horizontally while swiping for videos), while for horizontal videos ppl oftentimes have to turn the phone, remove rotation lock if needed to fully engage with the video: some additional hassel. So one empirical observation is that
+
+**TODO: Also discuss how causal analysis with traditional video interaction logs are problematic due to the non-randomized nature of video impressions.**
 
 -   Treatment T: video horizontal (1) vs vertical (0)
 
@@ -48,6 +54,9 @@ random_merged <- random_merged %>%
 length(unique(random_merged$video_id))
 length(unique(random_merged$user_id))
 dim(random_merged)
+
+#release storage
+rm(random, user_features, video_features)
 ```
 
 ```{r}
@@ -131,6 +140,15 @@ t.test(is_click ~ T, data = random_merged)
 t.test(is_like  ~ T, data = random_merged)
 ```
 
+Simple difference in mean estimator has shown that video being horizontal has a significant negative effect on the video click through rate, but a positive, insignificant effect on video like rate
+
+The data scarcity for the number of likes received can be a factor for our reduced power in analyzing: overall we only have 0.55% of total video impressions in randomized trials that result in likes, compared to 17.4% click throughs
+
+```{r}
+mean(random_merged$is_click, na.rm = TRUE)
+mean(random_merged$is_like,  na.rm = TRUE)
+```
+
 #### Lin's Estimator: Controlling for Covariates
 
 ```{r}
@@ -169,6 +187,7 @@ summary(lin_click)$coefficients["T", ]
 ```
 
 ```{r}
+#like estimate
 form_like <- as.formula(
   paste("is_like ~ T * (", paste(all_covariates, collapse = " + "), ")")
 )
@@ -176,3 +195,163 @@ form_like <- as.formula(
 lin_like <- lm(form_like, data = centered)
 summary(lin_like)$coefficients["T", ]
 ```
+
+After controlling for covariates and potential interaction effects, we can see that the previously identified negative relationship between horizontal video format and video click through rate vanishes: i.e. when adjusting for video duration, user features, video type, and treatment–covariate interactions, there is **no evidence** of a causal effect of horizontal format on click-through probability.
+
+In terms of video likes, there is still no any significant relationship identified
+
+## Randomized Trial - Using 27K Instead
+
+Given data scarcity might be an issue, resorting to random trials in complete data
+
+```{r}
+random_27k_path = 'data/KuaiRand-27K/log_random_4_22_to_5_08_27k.csv'
+user_features_27k_path = 'data/KuaiRand-27K/user_features_27k.csv'
+video_features_27k_path = 'data/KuaiRand-27K/video_features_basic_27k.csv'
+
+random_27k = read.csv(random_27k_path)
+user_features_27k = read.csv(user_features_27k_path)
+#this one is super large and takes quite a while (2.6G)
+video_features_27k = read.csv(video_features_27k_path)
+```
+
+```{r}
+random_27k_merged <- random_27k %>%
+  left_join(video_features_27k, by = "video_id")
+
+random_27k_merged <- random_27k_merged %>%
+  left_join(user_features_27k, by = "user_id")
+
+length(unique(random_27k_merged$video_id))
+length(unique(random_27k_merged$user_id))
+dim(random_27k_merged)
+
+#release storage
+rm(random_27k, user_features_27k, video_features_27k)
+```
+
+```{r}
+random_27k_merged$T = as.integer(random_27k_merged$server_width > random_27k_merged$server_height)
+```
+
+#### Diff in Means for 27K
+
+Actually the same trend as analysis for 1K dataset under simple sample mean:
+
+-   significant negative relationship between horizontal & click through
+
+-   no significant relationship between horizontal & likes
+
+```{r}
+t.test(is_click ~ T, data = random_27k_merged)
+t.test(is_like  ~ T, data = random_27k_merged)
+```
+
+#### Lin's for 27K
+
+Again, no significant relationship after adjusting for relevant covariates.
+
+```{r}
+#covariates to be controlled for req: fixed before randomization, cannot be affected by treatment
+#user_active_degree, is_video_author, follow_user_num, fans_user_num, register_days, video_type, upload_type, video_duration
+
+numerical_covariates <- c(
+  "follow_user_num",
+  "fans_user_num",
+  "register_days",
+  "video_duration"
+)
+
+categorical_covariates <- c(
+  "user_active_degree",
+  "is_video_author",
+  "video_type",
+  "upload_type"
+)
+
+all_covariates <- c(numerical_covariates, categorical_covariates)
+
+#center covariates
+centered_27k <- random_27k_merged %>%
+  mutate(across(all_of(numerical_covariates), ~ .x - mean(.x, na.rm = TRUE)))
+```
+
+```{r}
+#clicks estimate:
+form_click <- as.formula(
+  paste("is_click ~ T * (", paste(all_covariates, collapse = " + "), ")")
+)
+
+lin_click <- lm(form_click, data = centered_27k)
+summary(lin_click)$coefficients["T", ]
+```
+
+```{r}
+#like estimate
+form_like <- as.formula(
+  paste("is_like ~ T * (", paste(all_covariates, collapse = " + "), ")")
+)
+
+lin_like <- lm(form_like, data = centered_27k)
+summary(lin_like)$coefficients["T", ]
+```
+
+## Observational Studies
+
+Next we try to see if we can recover the same relationship from observational data: i.e. when the videos are not randomized and are shown to users via Kuaishou's internal recommendation algorithm
+
+#### Exploration & Comparison to randomized trials
+
+standard have significantly more video impression logs than random
+
+```{r}
+standard_path = 'data/KuaiRand-1K/data/log_standard_4_22_to_5_08_1k.csv'
+standard <- read.csv(standard_path)
+```
+
+```{r}
+standard_merged <- standard %>%
+  left_join(video_features, by = "video_id")
+
+standard_merged <- standard_merged %>%
+  left_join(user_features, by = "user_id")
+
+length(unique(standard_merged$video_id))
+length(unique(standard_merged$user_id))
+dim(standard_merged)
+```
+
+Comparison table shows two datasets are very different
+
+```{r}
+summary_stats <- function(df, name) {
+  data.frame(
+    dataset = name,
+    n_obs = nrow(df),
+    prop_T1 = mean(df$T, na.rm = TRUE),
+    click_rate = mean(df$is_click, na.rm = TRUE),
+    like_rate = mean(df$is_like, na.rm = TRUE)
+  )
+}
+
+random_stats  <- summary_stats(random_merged,  "Randomized Logs")
+standard_stats <- summary_stats(standard_merged, "Recommendation Logs")
+
+comparison_table <- bind_rows(random_stats, standard_stats)
+comparison_table
+```
+
+#### naive diff in mean
+
+Naive diff in mean estimators directly applied on observational user-video interaction logs show biased results: for both click through and like ratio, horizontal format seems to have a positive efffect
+
+```{r}
+t.test(is_click ~ T, data = standard_merged)
+t.test(is_like ~ T, data = standard_merged)
+```
+
+#### Propensity Score Model & Weighting
+
+## Operational/Business Insights
+
+Content creators might be less willing to create videos in horizontal format due to their perceived lower traffic (i.e click through rate). Our study essentially shows that the format of the video plays no significant role in influencing user's interaction and engagement of the videos when controlling for video-content and user features. Therefore, we encourage creators to choose simply the most suitable format for any particular video and prioritize the content quality instead.
