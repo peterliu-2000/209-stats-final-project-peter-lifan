@@ -1,0 +1,178 @@
+---
+title: "STATS209 Final Project"
+format: pdf
+editor: visual
+---
+
+## Outline
+
+-   Treatment T: video horizontal (1) vs vertical (0)
+
+-   Outcome Y: whether the user clicks / likes the video
+
+-   Covariates X: other user & video features
+
+Key insights: when `is_rand` = 1, user sees a video randomly chosen from a pool of 7388 video candidates: so technically the randomization is based on video ID, but since each video has a fixed format across all impressions (verified), this means that the treatment assignment is also as good as random
+
+## Data Load
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+random_path = 'data/KuaiRand-1K/data/log_random_4_22_to_5_08_1k.csv'
+user_features_path = 'data/KuaiRand-1K/data/user_features_1k.csv'
+video_features_path = 'data/KuaiRand-1K/data/video_features_basic_1k.csv'
+
+random = read.csv(random_path)
+user_features = read.csv(user_features_path)
+video_features = read.csv(video_features_path)
+```
+
+## Randomized Trials
+
+```{r}
+#Treatment variable creation:
+#T = 1 if horizontal, else vertical
+video_features$T = as.integer(video_features$server_width > video_features$server_height)
+```
+
+```{r}
+#merge random logs and user & video features
+random_merged <- random %>%
+  left_join(video_features, by = "video_id")
+
+random_merged <- random_merged %>%
+  left_join(user_features, by = "user_id")
+
+length(unique(random_merged$video_id))
+length(unique(random_merged$user_id))
+dim(random_merged)
+```
+
+```{r}
+#check distributions of treatment and outcome 
+table(random_merged$T)
+table(random_merged$is_click)
+table(random_merged$is_like)
+```
+
+Nice: each unique video is guaranteed to have the same height\*width across random impressions (i.e each video ID has a fixed T label)
+
+```{r}
+#check the possibility of different aspect ratios of any video at different impressions
+video_aspects <- random_merged %>%
+  distinct(video_id, server_width, server_height)
+
+aspect_counts <- video_aspects %>%
+  count(video_id, name = "n_aspect_combos")
+
+table(aspect_counts$n_aspect_combos)
+```
+
+```{r}
+#Checking for covariate balance in randomized logs:
+#TODO: This might not be necessary??
+smd <- function(x, t) {
+  m1 <- mean(x[t == 1], na.rm = TRUE)
+  m0 <- mean(x[t == 0], na.rm = TRUE)
+  s1 <- sd(x[t == 1], na.rm = TRUE)
+  s0 <- sd(x[t == 0], na.rm = TRUE)
+  (m1 - m0) / sqrt((s1^2 + s0^2) / 2)
+}
+
+smd_video_duration  <- smd(random_merged$video_duration, random_merged$T)
+smd_friend_user_num <- smd(random_merged$friend_user_num, random_merged$T)
+smd_register_days   <- smd(random_merged$register_days, random_merged$T)
+
+smd_video_duration
+smd_friend_user_num
+smd_register_days
+```
+
+Discovery: horizontal videos tend to be longer as well
+
+```{r}
+ggplot(random_merged, aes(x = factor(T), y = video_duration)) +
+  geom_boxplot()
+```
+
+#### Diff-in-mean Estimate of treatment effect on click & like
+
+```{r}
+# diff_click <- random_merged %>%
+#   summarise(
+#     mean_treated  = mean(is_click[T == 1], na.rm = TRUE),
+#     mean_control  = mean(is_click[T == 0], na.rm = TRUE),
+#     diff_in_means = mean_treated - mean_control
+#   )
+# diff_like <- random_merged %>%
+#   summarise(
+#     mean_treated  = mean(is_like[T == 1], na.rm = TRUE),
+#     mean_control  = mean(is_like[T == 0], na.rm = TRUE),
+#     diff_in_means = mean_treated - mean_control
+#   )
+# 
+# diff_table <- tibble(
+#   outcome         = c("is_click", "is_like"),
+#   mean_treated    = c(mean(random_merged$is_click[random_merged$T == 1]),
+#                       mean(random_merged$is_like[random_merged$T == 1])),
+#   mean_control    = c(mean(random_merged$is_click[random_merged$T == 0]),
+#                       mean(random_merged$is_like[random_merged$T == 0])),
+#   diff_in_means   = mean_treated - mean_control
+# )
+# diff_table
+```
+
+t-test insights:
+
+```{r}
+t.test(is_click ~ T, data = random_merged)
+t.test(is_like  ~ T, data = random_merged)
+```
+
+#### Lin's Estimator: Controlling for Covariates
+
+```{r}
+#covariates to be controlled for req: fixed before randomization, cannot be affected by treatment
+#user_active_degree, is_video_author, follow_user_num, fans_user_num, register_days, video_type, upload_type, video_duration
+
+numerical_covariates <- c(
+  "follow_user_num",
+  "fans_user_num",
+  "register_days",
+  "video_duration"
+)
+
+categorical_covariates <- c(
+  "user_active_degree",
+  "is_video_author",
+  "video_type",
+  "upload_type"
+)
+
+all_covariates <- c(numerical_covariates, categorical_covariates)
+
+#center covariates
+centered <- random_merged %>%
+  mutate(across(all_of(numerical_covariates), ~ .x - mean(.x, na.rm = TRUE)))
+```
+
+```{r}
+#clicks estimate:
+form_click <- as.formula(
+  paste("is_click ~ T * (", paste(all_covariates, collapse = " + "), ")")
+)
+
+lin_click <- lm(form_click, data = centered)
+summary(lin_click)$coefficients["T", ]
+```
+
+```{r}
+form_like <- as.formula(
+  paste("is_like ~ T * (", paste(all_covariates, collapse = " + "), ")")
+)
+
+lin_like <- lm(form_like, data = centered)
+summary(lin_like)$coefficients["T", ]
+```
