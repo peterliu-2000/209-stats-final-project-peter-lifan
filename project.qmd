@@ -25,6 +25,8 @@ Key insights: when `is_rand` = 1, user sees a video randomly chosen from a pool 
 ```{r}
 library(dplyr)
 library(ggplot2)
+library(tidyr)
+library(cobalt)
 
 random_path = 'data/KuaiRand-1K/data/log_random_4_22_to_5_08_1k.csv'
 user_features_path = 'data/KuaiRand-1K/data/user_features_1k.csv'
@@ -151,6 +153,22 @@ mean(random_merged$is_like,  na.rm = TRUE)
 
 #### Lin's Estimator: Controlling for Covariates
 
+Lists of covariates that we controlled:
+
+-   number of users that this user follow
+
+-   number of fans of this user
+
+-   number of registered daysw
+
+-   video duratioon
+
+-   user active degree (full_active, high_active, mid_active, unknown)
+
+-   whether the user has uploaded any video (binary)
+
+-   whether this video is ads (binary)
+
 ```{r}
 #covariates to be controlled for req: fixed before randomization, cannot be affected by treatment
 #user_active_degree, is_video_author, follow_user_num, fans_user_num, register_days, video_type, upload_type, video_duration
@@ -165,8 +183,7 @@ numerical_covariates <- c(
 categorical_covariates <- c(
   "user_active_degree",
   "is_video_author",
-  "video_type",
-  "upload_type"
+  "video_type"
 )
 
 all_covariates <- c(numerical_covariates, categorical_covariates)
@@ -265,8 +282,7 @@ numerical_covariates <- c(
 categorical_covariates <- c(
   "user_active_degree",
   "is_video_author",
-  "video_type",
-  "upload_type"
+  "video_type"
 )
 
 all_covariates <- c(numerical_covariates, categorical_covariates)
@@ -334,10 +350,10 @@ summary_stats <- function(df, name) {
   )
 }
 
-random_stats  <- summary_stats(random_merged,  "Randomized Logs")
+random_27k_stats  <- summary_stats(random_27k_merged,  "Randomized Logs (27k)")
 standard_stats <- summary_stats(standard_merged, "Recommendation Logs")
 
-comparison_table <- bind_rows(random_stats, standard_stats)
+comparison_table <- bind_rows(random_27k_stats, standard_stats)
 comparison_table
 ```
 
@@ -350,7 +366,109 @@ t.test(is_click ~ T, data = standard_merged)
 t.test(is_like ~ T, data = standard_merged)
 ```
 
-#### Propensity Score Model & Weighting
+#### Propensity Score Model
+
+```{r}
+#double check the covariates we are controlling for
+print(all_covariates)
+```
+
+```{r}
+### build propensity score model
+# Keep only rows with no NA in T or any covariate
+standard_cc <- standard_merged %>%
+  drop_na(T, all_of(all_covariates))
+
+nrow(standard_merged)
+nrow(standard_cc)  
+```
+
+```{r}
+# Refit PS model on complete-case data
+ps_model <- glm(ps_formula, data = standard_cc, family = binomial())
+
+# Now this works: lengths match
+standard_cc$ps <- predict(ps_model, type = "response")
+```
+
+Quite some overlap between propensity scores in treatment vs control
+
+```{r}
+ggplot(standard_cc, aes(x = ps, fill = factor(T))) +
+  geom_density(alpha = 0.4) +
+  labs(
+    title = "Propensity Score Distribution by Treatment Group",
+    x = "Propensity Score (P(T=1 | X))",
+    fill = "Treatment"
+  ) +
+  scale_fill_manual(values = c("0" = "skyblue", "1" = "orange"),
+                    labels = c("Vertical (T=0)", "Horizontal (T=1)")) +
+  theme_minimal()
+
+```
+
+#### IPW
+
+```{r}
+#trim extreme weights
+standard_ipw <- standard_cc %>%
+  filter(ps > 0.02, ps < 0.98)
+
+p_treated <- mean(standard_ipw$T == 1)
+
+#calc inverse weights
+standard_ipw <- standard_ipw %>%
+  mutate(
+    w_ATE = ifelse(
+      T == 1,
+      p_treated / ps,
+      (1 - p_treated) / (1 - ps)
+    )
+  )
+
+summary(standard_ipw$w_ATE)
+quantile(standard_ipw$w_ATE, probs = c(0, 0.5, 0.9, 0.99, 1))
+```
+
+```{r}
+## Checking covariates balance after reweighting
+#this one takes a long time
+
+bal.tab(
+  x = standard_ipw %>% select(all_of(all_covariates)),
+  treat = standard_ipw$T,
+  weights = standard_ipw$w_ATE,
+  estimand = "ATE"
+)
+
+love.plot(
+  bal.tab(
+    x = standard_ipw %>% select(all_of(all_covariates)),
+    treat = standard_ipw$T,
+    weights = standard_ipw$w_ATE,
+    estimand = "ATE"
+  ),
+  threshold = 0.1
+)
+
+```
+
+```{r}
+#weighted regressions that give point estimates, SEs and p-values
+
+ipw_click_lm <- lm(is_click ~ T, data = standard_ipw, weights = w_ATE)
+coef(summary(ipw_click_lm))["T", ]
+
+ipw_like_lm <- lm(is_like ~ T, data = standard_ipw, weights = w_ATE)
+coef(summary(ipw_like_lm))["T", ]
+
+```
+
+```{r}
+summary(standard_ipw$w_ATE)
+quantile(standard_ipw$w_ATE, probs = c(0.9, 0.95, 0.99, 0.999, 1))
+
+```
 
 ## Operational/Business Insights
 
