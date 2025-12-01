@@ -27,6 +27,7 @@ library(dplyr)
 library(ggplot2)
 library(tidyr)
 library(cobalt)
+library(MatchIt)
 
 random_path = 'data/KuaiRand-1K/data/log_random_4_22_to_5_08_1k.csv'
 user_features_path = 'data/KuaiRand-1K/data/user_features_1k.csv'
@@ -193,6 +194,8 @@ centered <- random_merged %>%
   mutate(across(all_of(numerical_covariates), ~ .x - mean(.x, na.rm = TRUE)))
 ```
 
+linear regression way to giving point estimation and CI for Lin's estimator
+
 ```{r}
 #clicks estimate:
 form_click <- as.formula(
@@ -211,6 +214,21 @@ form_like <- as.formula(
 
 lin_like <- lm(form_like, data = centered)
 summary(lin_like)$coefficients["T", ]
+```
+
+**TODO: a bit more research detail on mechanism: how this works?**
+
+More robust SE, clustering by user_id
+
+```{r}
+library(sandwich)
+library(lmtest)
+
+# Cluster-robust covariance by user
+vcov_user <- vcovCL(lin_click, cluster = ~ user_id)
+
+coeftest(lin_click, vcov = vcov_user)["T", ]
+coeftest(lin_like,  vcov = vcov_user)["T", ]
 ```
 
 After controlling for covariates and potential interaction effects, we can see that the previously identified negative relationship between horizontal video format and video click through rate vanishes: i.e. when adjusting for video duration, user features, video type, and treatment–covariate interactions, there is **no evidence** of a causal effect of horizontal format on click-through probability.
@@ -294,23 +312,28 @@ centered_27k <- random_27k_merged %>%
 
 ```{r}
 #clicks estimate:
-form_click <- as.formula(
-  paste("is_click ~ T * (", paste(all_covariates, collapse = " + "), ")")
-)
-
-lin_click <- lm(form_click, data = centered_27k)
-summary(lin_click)$coefficients["T", ]
+lin_click_27k <- lm(form_click, data = centered_27k)
+summary(lin_click_27k)$coefficients["T", ]
 ```
 
 ```{r}
 #like estimate
-form_like <- as.formula(
-  paste("is_like ~ T * (", paste(all_covariates, collapse = " + "), ")")
-)
-
-lin_like <- lm(form_like, data = centered_27k)
-summary(lin_like)$coefficients["T", ]
+lin_like_27k <- lm(form_like, data = centered_27k)
+summary(lin_like_27k)$coefficients["T", ]
 ```
+
+```{r}
+library(sandwich)
+library(lmtest)
+
+# Cluster-robust covariance by user
+vcov_user <- vcovCL(lin_click_27k, cluster = ~ user_id)
+
+coeftest(lin_click_27k, vcov = vcov_user)["T", ]
+coeftest(lin_like_27k,  vcov = vcov_user)["T", ]
+```
+
+Again, no significant relationship identified for both click through and like ratio using 27K data, suggesting data scarcity was NOT the cause for large Confidence Interval
 
 ## Observational Studies
 
@@ -340,6 +363,8 @@ dim(standard_merged)
 Comparison table shows two datasets are very different
 
 ```{r}
+standard_merged$T <- as.integer(standard_merged$server_width > standard_merged$server_height)
+
 summary_stats <- function(df, name) {
   data.frame(
     dataset = name,
@@ -368,6 +393,8 @@ t.test(is_like ~ T, data = standard_merged)
 
 #### Propensity Score Model
 
+The original observational studies contains 6.6M entries. For computational efficiency, we have downsized it by a factor of 20 for the remaining analysis
+
 ```{r}
 #double check the covariates we are controlling for
 print(all_covariates)
@@ -376,15 +403,22 @@ print(all_covariates)
 ```{r}
 ### build propensity score model
 # Keep only rows with no NA in T or any covariate
+#downsize by 1/10
 standard_cc <- standard_merged %>%
-  drop_na(T, all_of(all_covariates))
+  drop_na(T, all_of(all_covariates)) %>% 
+  sample_frac(size = 0.05)
 
 nrow(standard_merged)
-nrow(standard_cc)  
+nrow(standard_cc) 
+rm(standard_merged)
 ```
 
 ```{r}
 # Refit PS model on complete-case data
+ps_formula <- as.formula(
+  paste("T ~", paste(all_covariates, collapse = " + "))
+)
+
 ps_model <- glm(ps_formula, data = standard_cc, family = binomial())
 
 # Now this works: lengths match
@@ -407,7 +441,7 @@ ggplot(standard_cc, aes(x = ps, fill = factor(T))) +
 
 ```
 
-#### IPW
+#### IPW: Inversely Propensity Weighting
 
 ```{r}
 #trim extreme weights
@@ -426,8 +460,8 @@ standard_ipw <- standard_ipw %>%
     )
   )
 
-summary(standard_ipw$w_ATE)
-quantile(standard_ipw$w_ATE, probs = c(0, 0.5, 0.9, 0.99, 1))
+# summary(standard_ipw$w_ATE)
+# quantile(standard_ipw$w_ATE, probs = c(0, 0.5, 0.9, 0.99, 1))
 ```
 
 ```{r}
@@ -453,6 +487,29 @@ love.plot(
 
 ```
 
+Note that even after IPW, video duration is still not balanced in control vs treatment (**suggesting the logistic propensity model misspecified for relationship between video format and video duration?)**. Empirical distributions of video duration under horizontal vs vertical video are very different:
+
+```{r}
+standard_under10 <- standard_cc %>%
+  filter(video_duration <= 10 * 60 * 1000)
+
+library(ggplot2)
+
+ggplot(standard_under10, aes(x = video_duration, fill = factor(T))) +
+  geom_density(alpha = 0.4) +
+  scale_fill_manual(values = c("0" = "skyblue", "1" = "orange"),
+                    labels = c("Vertical (T = 0)", "Horizontal (T = 1)")) +
+  labs(
+    title = "Video Duration Distribution (Under 15 Minutes)",
+    x = "Video Duration (milliseconds)",
+    y = "Density",
+    fill = "Video Format"
+  ) +
+  coord_cartesian(xlim = c(0, 10 * 60 * 1000)) +
+  theme_minimal()
+
+```
+
 ```{r}
 #weighted regressions that give point estimates, SEs and p-values
 
@@ -468,6 +525,30 @@ coef(summary(ipw_like_lm))["T", ]
 summary(standard_ipw$w_ATE)
 quantile(standard_ipw$w_ATE, probs = c(0.9, 0.95, 0.99, 0.999, 1))
 
+```
+
+#### Propensity Score Matching
+
+**havent quite figured out this part yet!**
+
+```{r}
+#takes so long..
+
+m.out <- matchit(
+  formula = ps_formula,
+  data = standard_ipw,
+  distance = standard_ipw$ps,   # use your own PS model
+  method = "nearest",           # nearest neighbor
+  replace = FALSE,              # no replacement (optional)
+  caliper = 0.05                # restrict matches to similar PS
+)
+```
+
+```{r}
+matched_data <- match.data(m.out)
+
+bal.tab(m.out)
+love.plot(m.out, threshold = 0.1)
 ```
 
 ## Operational/Business Insights
